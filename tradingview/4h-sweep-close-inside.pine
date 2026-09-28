@@ -1,0 +1,104 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+indicator("4H Sweep & Close Inside (Continuation)", shorttitle = "4H Sweep+Inside", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ─── Concept ────────────────────────────────────────────────────────────────
+// C1 = the previous 4H candle, C2 = the 4H candle that just closed.
+// Bullish setup : C2 trades BELOW C1's low (sweeps sell-side liquidity) and then
+//                 CLOSES back INSIDE C1's range  → expect price to continue up
+//                 towards C1's high.
+// Bearish setup : C2 trades ABOVE C1's high (sweeps buy-side liquidity) and then
+//                 CLOSES back INSIDE C1's range  → expect price to continue down
+//                 towards C1's low.
+// An optional trend filter keeps only sweeps taken against a pullback, so the
+// signal is a continuation of the prevailing trend rather than a counter-trend
+// reversal.
+// Signals are evaluated only once C2 has closed, so they do not repaint.
+
+// ─── Inputs ─────────────────────────────────────────────────────────────────
+grpSetup   = "Setup"
+htf        = input.timeframe("240", "Sweep timeframe", group = grpSetup)
+excludeOB  = input.bool(true, "Ignore outside bars (both sides swept)", group = grpSetup)
+minSweep   = input.float(0.0, "Min sweep beyond C1 (% of C1 range)", minval = 0, step = 1, group = grpSetup)
+
+grpTrend   = "Continuation filter"
+trendMode  = input.string("EMA", "Trend filter", options = ["None", "EMA", "C1 direction", "EMA + C1 direction"], group = grpTrend)
+emaLen     = input.int(50, "EMA length (on sweep timeframe)", minval = 1, group = grpTrend)
+showEma    = input.bool(false, "Plot HTF EMA", group = grpTrend)
+
+grpVis     = "Visuals"
+showLevels = input.bool(true, "Draw C1 range / target / invalidation", group = grpVis)
+extendBars = input.int(6, "Extend levels (sweep-TF candles)", minval = 1, group = grpVis)
+bullCol    = input.color(color.new(color.teal, 0), "Bullish colour", group = grpVis)
+bearCol    = input.color(color.new(color.red, 0), "Bearish colour", group = grpVis)
+
+// ─── HTF data (non-repainting: offset [1] + lookahead_on) ─────────────────────
+// Index 1 inside the security call = C2 (last closed HTF candle), index 2 = C1.
+[c1T, c1H, c1L, c1O, c1C, c2H, c2L, c2C, htfEma] = request.security(syminfo.tickerid, htf,
+     [time[2], high[2], low[2], open[2], close[2], high[1], low[1], close[1], ta.ema(close, emaLen)[1]],
+     lookahead = barmerge.lookahead_on)
+
+newHtfBar = timeframe.change(htf)
+htfMs     = timeframe.in_seconds(htf) * 1000
+
+if timeframe.in_seconds() > timeframe.in_seconds(htf)
+    runtime.error("Chart timeframe must be less than or equal to the sweep timeframe.")
+
+// ─── Pattern ────────────────────────────────────────────────────────────────
+c1Range   = c1H - c1L
+sweepMin  = c1Range * minSweep / 100
+closedIn  = c2C < c1H and c2C > c1L
+outside   = c2H > c1H and c2L < c1L
+
+bullSweep = c2L < c1L - sweepMin and closedIn and not (excludeOB and outside)
+bearSweep = c2H > c1H + sweepMin and closedIn and not (excludeOB and outside)
+
+emaUp     = c2C > htfEma
+emaDn     = c2C < htfEma
+c1Up      = c1C > c1O
+c1Dn      = c1C < c1O
+
+bullTrend = switch trendMode
+    "EMA"                => emaUp
+    "C1 direction"       => c1Up
+    "EMA + C1 direction" => emaUp and c1Up
+    => true
+bearTrend = switch trendMode
+    "EMA"                => emaDn
+    "C1 direction"       => c1Dn
+    "EMA + C1 direction" => emaDn and c1Dn
+    => true
+
+bullSignal = newHtfBar and bullSweep and bullTrend
+bearSignal = newHtfBar and bearSweep and bearTrend
+
+// ─── Drawing ────────────────────────────────────────────────────────────────
+drawSetup(bool isBull) =>
+    col     = isBull ? bullCol : bearCol
+    endT    = time + htfMs * extendBars
+    target  = isBull ? c1H : c1L
+    invalid = isBull ? c2L : c2H
+    // C1 range box, target at C1's opposite extreme, invalidation at C2's sweep wick
+    box.new(c1T, c1H, time, c1L, xloc = xloc.bar_time, border_color = color.new(col, 60), bgcolor = color.new(col, 90))
+    line.new(time, target, endT, target, xloc = xloc.bar_time, color = col, width = 2)
+    line.new(time, invalid, endT, invalid, xloc = xloc.bar_time, color = color.new(col, 40), style = line.style_dashed)
+    label.new(endT, target, "Target (C1 " + (isBull ? "high" : "low") + ")", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(col, 80), textcolor = col, size = size.small)
+    label.new(endT, invalid, "Invalidation (C2 " + (isBull ? "low" : "high") + ")", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(col, 90), textcolor = col, size = size.tiny)
+
+if showLevels and bullSignal
+    drawSetup(true)
+if showLevels and bearSignal
+    drawSetup(false)
+
+plotshape(bullSignal, "Bullish sweep + close inside", shape.triangleup,   location.belowbar, bullCol, size = size.small, text = "Sweep▲")
+plotshape(bearSignal, "Bearish sweep + close inside", shape.triangledown, location.abovebar, bearCol, size = size.small, text = "Sweep▼")
+plot(showEma ? htfEma : na, "HTF EMA", color.new(color.orange, 0), 2)
+
+// ─── Alerts ─────────────────────────────────────────────────────────────────
+alertcondition(bullSignal, "Bullish 4H sweep + close inside", "{{ticker}}: 4H candle swept previous low and closed inside – bullish continuation")
+alertcondition(bearSignal, "Bearish 4H sweep + close inside", "{{ticker}}: 4H candle swept previous high and closed inside – bearish continuation")
+
+if bullSignal
+    alert(syminfo.ticker + ": 4H swept prior low " + str.tostring(c1L, format.mintick) + " and closed inside. Target " + str.tostring(c1H, format.mintick) + ", invalidation " + str.tostring(c2L, format.mintick), alert.freq_once_per_bar)
+if bearSignal
+    alert(syminfo.ticker + ": 4H swept prior high " + str.tostring(c1H, format.mintick) + " and closed inside. Target " + str.tostring(c1L, format.mintick) + ", invalidation " + str.tostring(c2H, format.mintick), alert.freq_once_per_bar)
